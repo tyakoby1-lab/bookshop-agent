@@ -222,9 +222,28 @@ def post(book, which):
     log(f"Posted {which} for {book['title']} (media {media_id})")
 
 
+def ig_check():
+    """Read-only check that the Instagram token works (no posting)."""
+    if not (IG_USER_ID and IG_TOKEN):
+        log("Instagram not configured yet (IG_USER_ID / IG_ACCESS_TOKEN missing)")
+        return
+    try:
+        r = requests.get(f"https://graph.instagram.com/{IG_API_VERSION}/me", timeout=30,
+                         params={"fields": "user_id,username", "access_token": IG_TOKEN})
+        d = r.json()
+        if r.ok:
+            match = "OK" if str(d.get("user_id")) == str(IG_USER_ID) else f"MISMATCH (secret IG_USER_ID={IG_USER_ID})"
+            log(f"Instagram connected as @{d.get('username')} user_id={d.get('user_id')} {match}")
+        else:
+            log(f"Instagram token problem: {d.get('error', {}).get('message', d)}")
+    except Exception as e:
+        log(f"Instagram check failed: {e}")
+
+
 # ---------- scheduler tick ----------
 
 def tick():
+    ig_check()
     now = dt.datetime.now(TZ)
     today = now.date()
     books = load_books()
