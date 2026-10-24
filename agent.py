@@ -108,7 +108,10 @@ def google_books(isbn):
 
 
 def download(url):
-    r = requests.get(url, timeout=30)
+    try:
+        r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0 bookshop-agent"})
+    except Exception:
+        return None
     if r.status_code != 200 or len(r.content) < 2000:
         return None
     try:
@@ -119,6 +122,7 @@ def download(url):
 
 def cover_image(book, info):
     candidates = [book["image_url"],
+                  f"https://images-us.bookshop.org/ingram/{book['isbn']}.jpg?width=1200",
                   f"https://covers.openlibrary.org/b/isbn/{book['isbn']}-L.jpg?default=false"]
     thumb = (info.get("imageLinks") or {}).get("thumbnail")
     if thumb:
@@ -255,10 +259,15 @@ def tick():
         else:
             log(f"Next cycle on {dt.date.fromisoformat(last) + dt.timedelta(days=CYCLE_DAYS)}")
 
-    # keep one draft waiting for your approval
-    if not any(b["status"] in ("drafted", "approved", "ready") for b in books):
-        for b in by_priority(books):
-            if b["status"] == "queued" and draft(b):
+    # keep one book prepared and waiting for your captions;
+    # a higher-priority book (e.g. a holiday book) also gets prepared right away
+    pending = [b for b in books if b["status"] in ("drafted", "approved", "ready")]
+    top = max((int(b["priority"] or 0) for b in pending), default=None)
+    for b in by_priority(books):
+        if b["status"] in ("queued", "needs_image"):
+            if top is not None and int(b["priority"] or 0) <= top:
+                break
+            if draft(b):
                 break
 
     save_books(books)
