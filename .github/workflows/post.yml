@@ -1,0 +1,38 @@
+name: bookshop-instagram-agent
+
+on:
+  schedule:
+    # GitHub cron is UTC. Israel is UTC+2 (winter) / UTC+3 (summer).
+    - cron: "47 5 * * *"    # morning run: ~07:47-08:47 Israel -> spotlight
+    - cron: "47 15 * * *"   # evening run: ~17:47-18:47 Israel -> review
+  workflow_dispatch: {}      # "Run workflow" button for manual runs
+
+permissions:
+  contents: write
+
+concurrency: agent
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Agent tick
+        run: python agent.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          PUBLIC_IMAGE_BASE: https://raw.githubusercontent.com/${{ github.repository }}/main/images
+          DRY_RUN: ${{ vars.DRY_RUN || '0' }}
+      - name: Save state, drafts and images
+        if: always()
+        run: |
+          git config user.name "bookshop-agent"
+          git config user.email "bookshop-agent@users.noreply.github.com"
+          git add books.csv state.json drafts images 2>/dev/null || true
+          git diff --cached --quiet || (git commit -m "agent: run $(date -u +%F_%H%M)" && git push)
