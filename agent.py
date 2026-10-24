@@ -2,16 +2,17 @@
 """
 Bookshop.org -> Instagram agent.
 
+Free version: no AI API. You write the captions (e.g. with Claude in chat).
+
 Every CYCLE_DAYS days it publishes two Instagram posts for one book:
-  1. a book spotlight (morning run)
-  2. a review written from YOUR notes (later run, same day)
+  1. a book spotlight (morning run)   -> captions/<isbn>-spotlight.txt
+  2. your review (evening run)        -> captions/<isbn>-review.txt
 For your own book (kind=self) the second post is an author post instead of a review.
 
 Flow per book in books.csv:
-  queued  -> agent drafts captions + a 4:5 cover image  -> drafted
-  drafted -> you read drafts/<isbn>.json, edit if needed, set status to approved
-  approved-> agent posts spotlight, then review          -> posted
-Books of kind "book" or "self" with empty review_notes are marked needs_notes and skipped.
+  queued  -> agent prepares a 4:5 cover image + book info (drafts/<isbn>.json) -> drafted
+  drafted -> you add the two caption files in captions/                        -> ready
+  ready   -> agent posts spotlight, then review                                -> posted
 
 Commands:
   python agent.py                run one scheduled tick (what GitHub Actions calls)
@@ -41,14 +42,12 @@ TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Jerusalem"))
 CYCLE_DAYS = int(os.getenv("CYCLE_DAYS", "2"))
 REVIEW_AFTER_HOUR = int(os.getenv("REVIEW_AFTER_HOUR", "15"))  # local hour
 SHOP_URL = os.getenv("SHOP_URL", "https://bookshop.org/shop/JewishChildrenBooks")
-SHOP_THEME = os.getenv("SHOP_THEME", "Jewish children's books")
 # Public base URL where images/ is served, e.g.
 # https://raw.githubusercontent.com/<you>/<repo>/main/images
 PUBLIC_IMAGE_BASE = os.getenv("PUBLIC_IMAGE_BASE", "").rstrip("/")
 IG_USER_ID = os.getenv("IG_USER_ID", "")
 IG_TOKEN = os.getenv("IG_ACCESS_TOKEN", "")
 IG_API_VERSION = os.getenv("IG_API_VERSION", "v23.0")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
 DRY_RUN = os.getenv("DRY_RUN", "0") == "1"
 
 FIELDS = ["isbn", "title", "author", "kind", "review_notes",
@@ -141,60 +140,22 @@ def pad_to_instagram(img, size=(1080, 1350), bg=(250, 247, 240)):
     return canvas
 
 
-# ---------- captions ----------
+# ---------- captions (written by you) ----------
 
-PROMPT = """You write Instagram captions for a Bookshop.org shop about {theme}.
-Shop link (goes in the bio, never paste URLs into the caption): {shop}
-
-Book:
-- Title: {title}
-- Author: {author}
-- Publisher description: {description}
-- Owner's notes: {notes}
-
-{task}
-
-Rules:
-- Use only facts from the description and notes. Do not invent plot points, awards, ages or quotes.
-- Warm, parent-friendly tone. Short paragraphs. A few emoji at most.
-- Each caption ends with "Link in bio 📚" and then 5-10 relevant hashtags.
-- Each caption under 1800 characters.
-Return ONLY JSON: {{"spotlight": "...", "second": "..."}}"""
-
-TASK_BOOK = """Write two captions:
-1. "spotlight": introduce the book (what it's about, who it's for).
-2. "second": a review in the shop owner's first-person voice, based ONLY on the owner's notes.
-   Keep their opinions; don't make them more positive than the notes are."""
-
-TASK_SELF = """This is the shop owner's OWN book. Write two captions:
-1. "spotlight": introduce the book.
-2. "second": an author's behind-the-scenes post in first person, based ONLY on the owner's notes.
-   This is NOT a review; never praise the book as if someone else were reviewing it."""
+CAPTIONS = ROOT / "captions"
 
 
-def write_captions(book, info):
-    import anthropic
-    client = anthropic.Anthropic()
-    prompt = PROMPT.format(
-        theme=SHOP_THEME, shop=SHOP_URL,
-        title=book["title"] or info.get("title", ""),
-        author=book["author"] or ", ".join(info.get("authors", [])),
-        description=(info.get("description") or "(none)")[:3000],
-        notes=book["review_notes"],
-        task=TASK_SELF if book["kind"] == "self" else TASK_BOOK,
-    )
-    msg = client.messages.create(model=CLAUDE_MODEL, max_tokens=2000,
-                                 messages=[{"role": "user", "content": prompt}])
-    text = "".join(b.text for b in msg.content if b.type == "text")
-    data = json.loads(text[text.find("{"): text.rfind("}") + 1])
-    return data["spotlight"].strip(), data["second"].strip()
+def caption_path(isbn, which):
+    return CAPTIONS / f"{isbn}-{which}.txt"
+
+
+def has_captions(book):
+    return all(caption_path(book["isbn"], w).exists() and
+               caption_path(book["isbn"], w).read_text(encoding="utf-8").strip()
+               for w in ("spotlight", "review"))
 
 
 def draft(book):
-    if not book["review_notes"]:
-        book["status"] = "needs_notes"
-        log(f"{book['isbn']}: no review_notes, marked needs_notes")
-        return False
     info = google_books(book["isbn"])
     book["title"] = book["title"] or info.get("title", "")
     book["author"] = book["author"] or ", ".join(info.get("authors", []))
@@ -205,17 +166,17 @@ def draft(book):
         return False
     IMAGES.mkdir(exist_ok=True)
     pad_to_instagram(img).save(IMAGES / f"{book['isbn']}.jpg", "JPEG", quality=90)
-    spotlight, second = write_captions(book, info)
     DRAFTS.mkdir(exist_ok=True)
     (DRAFTS / f"{book['isbn']}.json").write_text(json.dumps({
         "title": book["title"],
-        "spotlight_caption": spotlight,
-        "second_caption": second,
+        "author": book["author"],
+        "kind": book["kind"],
+        "description": info.get("description", ""),
         "image": f"images/{book['isbn']}.jpg",
+        "next_step": f"add captions/{book['isbn']}-spotlight.txt and captions/{book['isbn']}-review.txt",
     }, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     book["status"] = "drafted"
-    log(f"Drafted {book['title']} ({book['isbn']}). Review drafts/{book['isbn']}.json, "
-        f"then set status=approved in books.csv")
+    log(f"Prepared {book['title']} ({book['isbn']}). Now add its two caption files in captions/")
     return True
 
 
@@ -249,11 +210,10 @@ def ig_publish(caption, image_url):
 
 
 def post(book, which):
-    d = json.loads((DRAFTS / f"{book['isbn']}.json").read_text(encoding="utf-8"))
     if not PUBLIC_IMAGE_BASE and not DRY_RUN:
         raise SystemExit("PUBLIC_IMAGE_BASE must be set so Instagram can fetch the image")
     url = f"{PUBLIC_IMAGE_BASE}/{book['isbn']}.jpg"
-    caption = d["spotlight_caption"] if which == "spotlight" else d["second_caption"]
+    caption = caption_path(book["isbn"], which).read_text(encoding="utf-8").strip()
     media_id = ig_publish(caption, url)
     log(f"Posted {which} for {book['title']} (media {media_id})")
 
@@ -266,12 +226,15 @@ def tick():
     books = load_books()
     state = load_state()
     find = {b["isbn"]: b for b in books}
+    for b in books:
+        if b["status"] in ("drafted", "approved") and has_captions(b):
+            b["status"] = "ready"
 
     if state["step"] == "spotlight_posted":
         last = dt.date.fromisoformat(state["last_cycle"])
         book = find.get(state["current_isbn"])
         if book and (today > last or now.hour >= REVIEW_AFTER_HOUR):
-            post(book, "second")
+            post(book, "review")
             book["status"] = "posted"
             state.update(step="idle", current_isbn=None)
         else:
@@ -280,7 +243,7 @@ def tick():
         last = state["last_cycle"]
         due = last is None or today >= dt.date.fromisoformat(last) + dt.timedelta(days=CYCLE_DAYS)
         if due:
-            approved = [b for b in by_priority(books) if b["status"] == "approved"]
+            approved = [b for b in by_priority(books) if b["status"] == "ready"]
             if approved:
                 book = approved[0]
                 post(book, "spotlight")
@@ -288,12 +251,12 @@ def tick():
                 state.update(step="spotlight_posted", last_cycle=today.isoformat(),
                              current_isbn=book["isbn"])
             else:
-                log("Post is due but no book is approved yet")
+                log("Post is due but no book has its captions yet")
         else:
             log(f"Next cycle on {dt.date.fromisoformat(last) + dt.timedelta(days=CYCLE_DAYS)}")
 
     # keep one draft waiting for your approval
-    if not any(b["status"] in ("drafted", "approved") for b in books):
+    if not any(b["status"] in ("drafted", "approved", "ready") for b in books):
         for b in by_priority(books):
             if b["status"] == "queued" and draft(b):
                 break
